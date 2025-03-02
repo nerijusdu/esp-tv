@@ -7,6 +7,7 @@
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
+#define SCREEN_SIZE 8192
 
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
@@ -20,9 +21,12 @@ String apiEndpoint = "http://192.168.1.172:8080/api/tv";
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 struct View {
-  int data[SCREEN_WIDTH * SCREEN_HEIGHT];
+  bool* data;
+  int length;
   int refreshAfter;
 };
+
+View* view = new View();
 
 void get_next_view(View* view) {
   Serial.println("Fetching data from API");
@@ -40,7 +44,7 @@ void get_next_view(View* view) {
     String response = http.getString();
 
     int len = response.length();
-    if (len != SCREEN_HEIGHT * SCREEN_WIDTH) {
+    if (len < SCREEN_SIZE) {
       Serial.print("Invalid data length: ");
       Serial.println(len);
       display.clearDisplay();
@@ -48,12 +52,34 @@ void get_next_view(View* view) {
       display.println("Invalid data length");
       display.println(len);
       display.display();
+      (*view).refreshAfter = 5000;
       return;
     }
     
-    for (int i = 0; i < len; i++) {
-      (*view).data[i] = response[i];
+    Serial.println("Data length is valid");
+    Serial.println(len);
+    view->length = len;
+    // 5 frames seems to be max unless i think of some way to use less bytes for updates
+    view->data = (bool*)malloc(len * sizeof(bool));
+
+    if (view->data == NULL) {
+      view->length = 0;
+      Serial.println("Failed to allocate data");
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Failed to allocate data");
+      display.display();
+      (*view).refreshAfter = 5000;
+      return;
     }
+
+    Serial.println("Data allocated");
+    Serial.println("Copying data to view");
+    for (int i = 0; i < len; i++) {
+      view->data[i] = response[i] == '1';
+    }
+
+    Serial.println("Data copied to view");
 
     (*view).refreshAfter = http.header("X-Refresh-After").toInt();
     if ((*view).refreshAfter == 0) {
@@ -62,6 +88,11 @@ void get_next_view(View* view) {
   } else {
     Serial.print("Error on HTTP request, code: ");
     Serial.println(httpResCode);
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Error on HTTP request");
+    display.println(httpResCode);
+    (*view).refreshAfter = 5000;
   }
 
   http.end();
@@ -121,16 +152,36 @@ void connect_wifi() {
   display.display();
 }
 
-void display_stats(int data[]) {
+void display_stats() {
+  int len = view->length;
+  if (len == 0) {
+    return;
+  }
+
   display.clearDisplay();
 
+  int screenSize = SCREEN_SIZE;
+  int framesCount = len / screenSize;
+  Serial.print("Frames count: ");
+  Serial.println(framesCount);
+  for (int f = 0; f < framesCount; f++) {
+    display.clearDisplay();
+
+    int frameStart = f * screenSize;
   for (int i = 0; i < SCREEN_HEIGHT; i++) {
     for (int j = 0; j < SCREEN_WIDTH; j++) {
-      display.drawPixel(j, i, data[i * SCREEN_WIDTH + j]-48); // -48 to convert from ASCII to int
+        int index = frameStart + (i * SCREEN_WIDTH + j);
+        if (index < len) {
+          display.drawPixel(j, i, view->data[index] ? WHITE : BLACK);
+        }
     }
   }
-  
   display.display();
+    delay(200);
+  }
+
+  free(view->data);
+  view->length = 0;
 }
 
 void setup() {
@@ -156,9 +207,8 @@ void setup() {
   delay(1000);
 }
 
-View* view = new View();
 void loop() {
   get_next_view(view);
-  display_stats((*view).data);
+  display_stats();
   delay((*view).refreshAfter);
 }
